@@ -1,4 +1,4 @@
-# Middle Click Autoscroll
+# Middle Click Autoscroll for Safari
 
 `Middle Click Autoscroll` is a macOS Safari Web Extension that adds Windows-style middle-click autoscroll to Safari.
 
