@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Middle Click Autoscroll</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <main class="popup">
+        <header class="popup-header">
+            <img class="popup-icon" src="images/icon-128.png" alt="Middle Click Autoscroll icon">
+            <div>
+                <h1>Middle Click Autoscroll</h1>
+                <p>Windows-style middle-click autoscroll for Safari.</p>
+            </div>
+        </header>
+
+        <section class="settings">
+            <label class="setting-row" for="enabled-toggle">
+                <span class="setting-copy">
+                    <span class="setting-title">Middle Click Autoscroll</span>
+                    <span class="setting-description">Enable or disable middle-click autoscroll everywhere.</span>
+                </span>
+                <input id="enabled-toggle" class="toggle-input" type="checkbox" role="switch" aria-describedby="enabled-description">
+                <span class="toggle" aria-hidden="true"></span>
+            </label>
+            <p id="enabled-description" class="sr-only">Enable or disable middle-click autoscroll everywhere.</p>
+        </section>
+    </main>
+    <script src="popup.js"></script>
+</body>
+</html>

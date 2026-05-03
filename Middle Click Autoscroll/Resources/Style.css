@@ -1,0 +1,60 @@
+* {
+    -webkit-user-select: none;
+    -webkit-user-drag: none;
+    cursor: default;
+}
+
+:root {
+    color-scheme: light dark;
+
+    --content-width: 420px;
+}
+
+html {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+
+    gap: 12px;
+    margin: 0 auto;
+    max-width: var(--content-width);
+    padding: 24px 28px 20px;
+    min-height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+
+    font: -apple-system-short-body;
+    text-align: left;
+}
+
+img {
+    width: 84px;
+    height: 84px;
+    margin-bottom: 2px;
+}
+
+h1 {
+    margin: 0;
+    font: -apple-system-headline;
+    text-align: center;
+}
+
+.lead,
+.footnote {
+    margin: 0;
+    color: color-mix(in srgb, currentColor 72%, transparent);
+    text-align: center;
+}
+
+button {
+    align-self: center;
+    min-width: 250px;
+    padding: 8px 14px;
+    font-size: 1em;
+}

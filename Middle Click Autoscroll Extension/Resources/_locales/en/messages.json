@@ -1,0 +1,10 @@
+{
+    "extension_name": {
+        "message": "Middle Click Autoscroll",
+        "description": "The display name for the extension."
+    },
+    "extension_description": {
+        "message": "Adds Windows-style middle-click autoscroll to Safari.",
+        "description": "Description of what the extension does."
+    }
+}
