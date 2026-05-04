@@ -54,4 +54,4 @@ The helper app opens Safari and explains the extension enablement step. Once ena
 
 ## License
 
-No license has been added yet. If you want other people to use, modify, or redistribute this project, add a license before publishing.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
