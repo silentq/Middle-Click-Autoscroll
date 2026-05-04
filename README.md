@@ -18,6 +18,12 @@
 
 ## Requirements
 
+Installing:
+- macOS
+- Safari
+- A pointing device with a middle mouse button or equivalent input
+  
+Building:
 - macOS
 - Xcode
 - Safari
@@ -36,7 +42,7 @@
 
 This release is currently unsigned, so macOS may show a warning the first time you open it.
 
-## Running Locally
+## Building Locally
 
 1. Open `Middle Click Autoscroll.xcodeproj` in Xcode.
 2. Select the `Middle Click Autoscroll` app scheme.
