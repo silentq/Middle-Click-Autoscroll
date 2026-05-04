@@ -1,5 +1,6 @@
 const promiseAPI = globalThis.browser;
 const callbackAPI = globalThis.chrome;
+
 const enabledStorageKey = "isAutoscrollEnabled";
 
 const enabledToggle = document.getElementById("enabled-toggle");
@@ -36,7 +37,9 @@ function setStorage(items) {
 }
 
 async function refreshPopupState() {
-    const { [enabledStorageKey]: isEnabled = true } = await getStorage({ [enabledStorageKey]: true });
+    const { [enabledStorageKey]: isEnabled = true } = await getStorage({
+        [enabledStorageKey]: true
+    });
     enabledToggle.checked = isEnabled;
 }
 

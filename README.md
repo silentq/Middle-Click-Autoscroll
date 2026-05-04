@@ -7,7 +7,9 @@
 - Toggles autoscroll with the middle mouse button.
 - Shows a centered autoscroll indicator at the click position.
 - Scrolls the nearest scrollable container, not just the page.
-- Avoids hijacking middle-clicks on links.
+- Starts scrolling as soon as the pointer moves beyond the indicator’s vertical or horizontal radius.
+- Passes remaining scroll to parent containers when nested areas reach their limits.
+- Avoids hijacking middle-clicks on links and common interactive controls.
 - Includes a popup toggle to enable or disable the feature globally.
 
 ## Project Structure
@@ -51,11 +53,12 @@ This release is currently unsigned, so macOS may show a warning the first time y
 5. Enable `Middle Click Autoscroll`.
 6. Set website access to `All Websites` if Safari prompts for it.
 
-The helper app opens Safari and explains the extension enablement step. Once enabled, the extension popup can be used to turn autoscroll on or off.
+The helper app opens Safari and explains the extension enablement step. Once enabled, the extension popup can be used to turn autoscroll on or off globally.
 
 ## Notes
 
 - This repository is intended for source distribution on GitHub rather than App Store submission.
+- The extension requests `storage` to persist the global enable/disable preference.
 - Xcode user data, derived data, and build artifacts are ignored.
 
 ## License

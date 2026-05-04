@@ -1,23 +1,40 @@
-const deadZoneScreenFraction = 0.04;
-const maximumAxisSpeed = 100;
-const edgeThreshold = 24;
-const edgeAutoScrollSpeed = 120;
-const nominalFrameDuration = 1000 / 60;
-const globalAutoscrollGain = 1.0;
-const pointerDisplacementGain = 1.0;
-const edgeBlendRange = 42;
-const virtualPointerMaxDistance = 480;
-const velocitySmoothing = 0.22;
-const maximumAppliedScrollPerFrame = 100;
-const queuedScrollLimit = maximumAppliedScrollPerFrame * 2.5;
+const INDICATOR_SIZE_PX = 34;
+const INDICATOR_RADIUS_PX = INDICATOR_SIZE_PX / 2;
+const MAX_SCROLL_PX_PER_SECOND = 6000;
+const EDGE_THRESHOLD_PX = 24;
+const EDGE_AUTO_SCROLL_PX_PER_SECOND = 7200;
+const GLOBAL_AUTOSCROLL_GAIN = 1.0;
+const POINTER_DISPLACEMENT_GAIN = 1.0;
+const EDGE_BLEND_RANGE_PX = 42;
+const VIRTUAL_POINTER_MAX_DISTANCE_PX = 480;
+const VELOCITY_SMOOTHING_PER_SECOND = 14.9;
+const MAX_QUEUED_SCROLL_PX = 250;
+const MAX_TIMESTEP_MS = 50;
+const DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND = 12;
+const INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND = 30;
+const MIN_SCROLL_PX_PER_SECOND = 35;
+
 const promiseAPI = globalThis.browser;
 const callbackAPI = globalThis.chrome;
 const extensionAPI = promiseAPI ?? callbackAPI;
+
 const enabledStorageKey = "isAutoscrollEnabled";
+const interactiveTargetSelector = [
+    "a[href]",
+    "area[href]",
+    "button",
+    "input",
+    "textarea",
+    "select",
+    "summary",
+    "[contenteditable]:not([contenteditable=\"false\"])",
+    "[role=\"button\"]",
+    "[role=\"link\"]",
+    "[data-no-autoscroll]"
+].join(", ");
 
 let isScrollLockEnabled = false;
 let isAutoscrollEnabled = true;
-let scrollIndicator = null;
 let indicatorPosition = null;
 let animationFrameID = null;
 let lastAnimationTimestamp = null;
@@ -30,13 +47,68 @@ let pendingScrollY = 0;
 let activeScrollTarget = null;
 let activeScrollAxes = { horizontal: false, vertical: true };
 let isHandlingMiddleClick = false;
+let scrollIndicatorHost = null;
+let scrollIndicatorElements = null;
 
 function clamp(value, minimum, maximum) {
     return Math.max(minimum, Math.min(maximum, value));
 }
 
+function isPageAutoscrollEnabled() {
+    return isAutoscrollEnabled;
+}
+
 function getRootScrollElement() {
     return document.scrollingElement || document.documentElement;
+}
+
+function normalizeScrollableElement(element) {
+    if (!(element instanceof Element)) {
+        return getRootScrollElement();
+    }
+
+    return element === document.body || element === document.documentElement
+        ? getRootScrollElement()
+        : element;
+}
+
+function getAxisMetrics(element, axis) {
+    const target = normalizeScrollableElement(element);
+    const isHorizontal = axis === "x";
+    const position = isHorizontal ? target.scrollLeft : target.scrollTop;
+    const maxPosition = Math.max(
+        0,
+        (isHorizontal ? target.scrollWidth - target.clientWidth : target.scrollHeight - target.clientHeight)
+    );
+
+    return { position, maxPosition };
+}
+
+function canScrollAlongAxis(element, axis) {
+    const { maxPosition } = getAxisMetrics(element, axis);
+    return maxPosition > 1;
+}
+
+function canScrollFurther(element, deltaX, deltaY) {
+    const target = normalizeScrollableElement(element);
+
+    if (deltaX !== 0) {
+        const { position, maxPosition } = getAxisMetrics(target, "x");
+
+        if ((deltaX < 0 && position > 0.5) || (deltaX > 0 && position < maxPosition - 0.5)) {
+            return true;
+        }
+    }
+
+    if (deltaY !== 0) {
+        const { position, maxPosition } = getAxisMetrics(target, "y");
+
+        if ((deltaY < 0 && position > 0.5) || (deltaY > 0 && position < maxPosition - 0.5)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function canScrollElement(element) {
@@ -44,19 +116,44 @@ function canScrollElement(element) {
         return false;
     }
 
-    const rootScrollElement = getRootScrollElement();
+    const target = normalizeScrollableElement(element);
 
-    if (element === rootScrollElement || element === document.body || element === document.documentElement) {
-        return rootScrollElement.scrollHeight > rootScrollElement.clientHeight + 1
-            || rootScrollElement.scrollWidth > rootScrollElement.clientWidth + 1;
+    if (target === getRootScrollElement()) {
+        return canScrollAlongAxis(target, "x") || canScrollAlongAxis(target, "y");
     }
 
-    const style = window.getComputedStyle(element);
+    const style = window.getComputedStyle(target);
     const overflowYAllowsScroll = /(auto|scroll|overlay)/.test(style.overflowY);
     const overflowXAllowsScroll = /(auto|scroll|overlay)/.test(style.overflowX);
 
-    return (overflowYAllowsScroll && element.scrollHeight > element.clientHeight + 1)
-        || (overflowXAllowsScroll && element.scrollWidth > element.clientWidth + 1);
+    return (overflowYAllowsScroll && canScrollAlongAxis(target, "y"))
+        || (overflowXAllowsScroll && canScrollAlongAxis(target, "x"));
+}
+
+function getScrollableParent(element) {
+    const rootScrollElement = getRootScrollElement();
+    const startingElement = normalizeScrollableElement(element);
+
+    if (startingElement === rootScrollElement) {
+        return null;
+    }
+
+    let currentNode = startingElement.parentNode;
+
+    while (currentNode) {
+        if (currentNode instanceof ShadowRoot) {
+            currentNode = currentNode.host;
+            continue;
+        }
+
+        if (currentNode instanceof Element && canScrollElement(currentNode)) {
+            return normalizeScrollableElement(currentNode);
+        }
+
+        currentNode = currentNode.parentNode;
+    }
+
+    return rootScrollElement;
 }
 
 function findScrollableContainer(startNode) {
@@ -64,9 +161,7 @@ function findScrollableContainer(startNode) {
 
     while (currentNode) {
         if (currentNode instanceof Element && canScrollElement(currentNode)) {
-            return currentNode === document.body || currentNode === document.documentElement
-                ? getRootScrollElement()
-                : currentNode;
+            return normalizeScrollableElement(currentNode);
         }
 
         if (currentNode instanceof ShadowRoot) {
@@ -87,70 +182,189 @@ function resolveScrollTarget(event) {
     return findScrollableContainer(anchoredElement || eventTarget || document.body);
 }
 
-function applyScrollDelta(deltaX, deltaY) {
-    const target = activeScrollTarget || getRootScrollElement();
+function scrollElementBy(target, deltaX, deltaY) {
+    const resolvedTarget = normalizeScrollableElement(target);
+    let remainingX = deltaX;
+    let remainingY = deltaY;
 
-    if (target === getRootScrollElement()) {
-        target.scrollLeft += deltaX;
-        target.scrollTop += deltaY;
-        return;
+    if (deltaX !== 0 && canScrollAlongAxis(resolvedTarget, "x")) {
+        const { position, maxPosition } = getAxisMetrics(resolvedTarget, "x");
+        const nextPosition = clamp(position + deltaX, 0, maxPosition);
+        resolvedTarget.scrollLeft = nextPosition;
+        remainingX = deltaX - (resolvedTarget.scrollLeft - position);
     }
 
-    target.scrollLeft += deltaX;
-    target.scrollTop += deltaY;
+    if (deltaY !== 0 && canScrollAlongAxis(resolvedTarget, "y")) {
+        const { position, maxPosition } = getAxisMetrics(resolvedTarget, "y");
+        const nextPosition = clamp(position + deltaY, 0, maxPosition);
+        resolvedTarget.scrollTop = nextPosition;
+        remainingY = deltaY - (resolvedTarget.scrollTop - position);
+    }
+
+    return { remainingX, remainingY };
+}
+
+function applyScrollDeltaWithChaining(startTarget, deltaX, deltaY) {
+    let currentTarget = normalizeScrollableElement(startTarget);
+    let remainingX = deltaX;
+    let remainingY = deltaY;
+    const visitedTargets = new Set();
+
+    while (
+        currentTarget
+        && !visitedTargets.has(currentTarget)
+        && (Math.abs(remainingX) > 0.01 || Math.abs(remainingY) > 0.01)
+    ) {
+        visitedTargets.add(currentTarget);
+
+        if (canScrollFurther(currentTarget, remainingX, remainingY)) {
+            const applied = scrollElementBy(currentTarget, remainingX, remainingY);
+            remainingX = applied.remainingX;
+            remainingY = applied.remainingY;
+        }
+
+        currentTarget = getScrollableParent(currentTarget);
+    }
+}
+
+function getScrollChainAxes(target) {
+    const axes = { horizontal: false, vertical: false };
+    let currentTarget = normalizeScrollableElement(target);
+    const visitedTargets = new Set();
+
+    while (currentTarget && !visitedTargets.has(currentTarget)) {
+        visitedTargets.add(currentTarget);
+        axes.horizontal = axes.horizontal || canScrollAlongAxis(currentTarget, "x");
+        axes.vertical = axes.vertical || canScrollAlongAxis(currentTarget, "y");
+        currentTarget = getScrollableParent(currentTarget);
+    }
+
+    return axes;
+}
+
+function getClosestMatchingElement(startNode, selector) {
+    let currentNode = startNode instanceof Node ? startNode : null;
+
+    while (currentNode) {
+        if (currentNode instanceof Element) {
+            const matchingElement = currentNode.closest(selector);
+
+            if (matchingElement) {
+                return matchingElement;
+            }
+        }
+
+        if (currentNode instanceof ShadowRoot) {
+            currentNode = currentNode.host;
+            continue;
+        }
+
+        currentNode = currentNode.parentNode;
+    }
+
+    return null;
+}
+
+function findInteractiveTarget(target) {
+    return getClosestMatchingElement(target, interactiveTargetSelector);
 }
 
 function createScrollIndicator() {
-    const indicator = document.createElement("div");
-    indicator.setAttribute("data-scroll-lock-indicator", "true");
-    indicator.style.position = "fixed";
-    indicator.style.width = "34px";
-    indicator.style.height = "34px";
-    indicator.style.marginLeft = "-17px";
-    indicator.style.marginTop = "-17px";
-    indicator.style.border = "1px solid rgba(0, 0, 0, 0.30)";
-    indicator.style.borderRadius = "50%";
-    indicator.style.background = "rgba(255, 255, 255, 0.98)";
-    indicator.style.boxShadow = "0 1px 4px rgba(0, 0, 0, 0.22)";
-    indicator.style.pointerEvents = "none";
-    indicator.style.zIndex = "2147483647";
-    indicator.style.userSelect = "none";
-    indicator.style.webkitUserSelect = "none";
-    indicator.style.overflow = "hidden";
-    return indicator;
+    const host = document.createElement("div");
+    host.setAttribute("data-middle-click-autoscroll-indicator", "true");
+    host.style.position = "fixed";
+    host.style.left = "0";
+    host.style.top = "0";
+    host.style.width = `${INDICATOR_SIZE_PX}px`;
+    host.style.height = `${INDICATOR_SIZE_PX}px`;
+    host.style.transform = `translate(-${INDICATOR_RADIUS_PX}px, -${INDICATOR_RADIUS_PX}px)`;
+    host.style.pointerEvents = "none";
+    host.style.userSelect = "none";
+    host.style.webkitUserSelect = "none";
+    host.style.zIndex = "2147483647";
+    host.style.contain = "layout style paint";
+    host.style.setProperty("--up-color", "rgba(17, 17, 17, 0.42)");
+    host.style.setProperty("--down-color", "rgba(17, 17, 17, 0.42)");
+    host.style.setProperty("--center-color", "rgba(17, 17, 17, 0.82)");
+
+    const shadowRoot = host.attachShadow({ mode: "open" });
+
+    shadowRoot.innerHTML = `
+        <style>
+            :host {
+                all: initial;
+            }
+
+            .indicator {
+                display: block;
+                box-sizing: border-box;
+                width: ${INDICATOR_SIZE_PX}px;
+                height: ${INDICATOR_SIZE_PX}px;
+                border: 1px solid rgba(0, 0, 0, 0.30);
+                border-radius: 50%;
+                background: rgba(255, 255, 255, 0.98);
+                box-shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
+                overflow: hidden;
+            }
+
+            svg {
+                display: block;
+                width: ${INDICATOR_SIZE_PX}px;
+                height: ${INDICATOR_SIZE_PX}px;
+            }
+
+            .arrow-up {
+                fill: var(--up-color);
+            }
+
+            .arrow-down {
+                fill: var(--down-color);
+            }
+
+            .center-dot {
+                fill: var(--center-color);
+            }
+        </style>
+        <div class="indicator" aria-hidden="true">
+            <svg viewBox="0 0 34 34" focusable="false">
+                <path class="arrow-up" d="M17 6.2 L12.4 12.8 H15.5 V15.3 H18.5 V12.8 H21.6 Z" />
+                <circle class="center-dot" cx="17" cy="17" r="3.6" />
+                <path class="arrow-down" d="M17 27.8 L21.6 21.2 H18.5 V18.7 H15.5 V21.2 H12.4 Z" />
+            </svg>
+        </div>
+    `;
+
+    return {
+        host,
+        updateColors(upColor, downColor, centerColor) {
+            host.style.setProperty("--up-color", upColor);
+            host.style.setProperty("--down-color", downColor);
+            host.style.setProperty("--center-color", centerColor);
+        }
+    };
+}
+
+function ensureScrollIndicator() {
+    if (!scrollIndicatorElements) {
+        scrollIndicatorElements = createScrollIndicator();
+        scrollIndicatorHost = scrollIndicatorElements.host;
+    }
+
+    return scrollIndicatorElements;
 }
 
 function showScrollIndicator(x, y) {
-    if (!scrollIndicator) {
-        scrollIndicator = createScrollIndicator();
-    }
+    const indicator = ensureScrollIndicator();
+    indicator.host.style.left = `${x}px`;
+    indicator.host.style.top = `${y}px`;
 
-    scrollIndicator.style.left = `${x}px`;
-    scrollIndicator.style.top = `${y}px`;
-
-    if (!scrollIndicator.isConnected) {
-        document.documentElement.appendChild(scrollIndicator);
+    if (!indicator.host.isConnected) {
+        document.documentElement.appendChild(indicator.host);
     }
 }
 
 function hideScrollIndicator() {
-    scrollIndicator?.remove();
-}
-
-function getScrollTargetAxes(target) {
-    const resolvedTarget = target || getRootScrollElement();
-    const isRootTarget = resolvedTarget === getRootScrollElement();
-    const clientWidth = isRootTarget ? window.innerWidth : resolvedTarget.clientWidth;
-    const clientHeight = isRootTarget ? window.innerHeight : resolvedTarget.clientHeight;
-
-    return {
-        horizontal: resolvedTarget.scrollWidth > clientWidth + 1,
-        vertical: resolvedTarget.scrollHeight > clientHeight + 1
-    };
-}
-
-function hasScrollableAxis(axes) {
-    return axes.horizontal || axes.vertical;
+    scrollIndicatorHost?.remove();
 }
 
 function getArrowColor(isActive, isAvailable) {
@@ -166,9 +380,12 @@ function getArrowColor(isActive, isAvailable) {
 }
 
 function getDirectionalCursor(velocity) {
-    const threshold = 0.1;
-    const horizontalDirection = Math.abs(velocity.x) > threshold ? Math.sign(velocity.x) : 0;
-    const verticalDirection = Math.abs(velocity.y) > threshold ? Math.sign(velocity.y) : 0;
+    const horizontalDirection = Math.abs(velocity.x) > DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND
+        ? Math.sign(velocity.x)
+        : 0;
+    const verticalDirection = Math.abs(velocity.y) > DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND
+        ? Math.sign(velocity.y)
+        : 0;
 
     if (horizontalDirection === 0 && verticalDirection === 0) {
         return "default";
@@ -211,23 +428,19 @@ function updateActiveCursor(velocity = { x: 0, y: 0 }) {
 }
 
 function updateScrollIndicator(velocity = { x: 0, y: 0 }) {
-    if (!scrollIndicator) {
+    if (!scrollIndicatorElements) {
         return;
     }
 
-    const activeY = Math.abs(velocity.y) > 0.1 ? Math.sign(velocity.y) : 0;
+    const activeY = Math.abs(velocity.y) > INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND
+        ? Math.sign(velocity.y)
+        : 0;
 
-    const upColor = getArrowColor(activeY < 0, true);
-    const downColor = getArrowColor(activeY > 0, true);
-    const centerColor = activeY !== 0 ? "#111111" : "rgba(17, 17, 17, 0.82)";
-
-    scrollIndicator.innerHTML = `
-        <svg viewBox="0 0 34 34" width="34" height="34" aria-hidden="true">
-            <path d="M17 6.2 L12.4 12.8 H15.5 V15.3 H18.5 V12.8 H21.6 Z" fill="${upColor}" />
-            <circle cx="17" cy="17" r="3.6" fill="${centerColor}" />
-            <path d="M17 27.8 L21.6 21.2 H18.5 V18.7 H15.5 V21.2 H12.4 Z" fill="${downColor}" />
-        </svg>
-    `;
+    scrollIndicatorElements.updateColors(
+        getArrowColor(activeY < 0, activeScrollAxes.vertical),
+        getArrowColor(activeY > 0, activeScrollAxes.vertical),
+        activeY !== 0 ? "#111111" : "rgba(17, 17, 17, 0.82)"
+    );
 }
 
 function getAxisSpeed(distance, viewportSize, isEnabled) {
@@ -235,16 +448,21 @@ function getAxisSpeed(distance, viewportSize, isEnabled) {
         return 0;
     }
 
-    const normalizedDistance = Math.abs(distance) / Math.max(1, viewportSize);
+    const distanceOutsideIndicator = Math.max(0, Math.abs(distance) - INDICATOR_RADIUS_PX);
+    const usableViewport = Math.max(1, viewportSize / 2 - INDICATOR_RADIUS_PX);
 
-    if (normalizedDistance <= deadZoneScreenFraction) {
+    if (distanceOutsideIndicator <= 0) {
         return 0;
     }
 
-    const effectivePercentage = normalizedDistance - deadZoneScreenFraction;
-    const linearSpeed = Math.min(maximumAxisSpeed, effectivePercentage * maximumAxisSpeed * 2);
+    const normalizedDistance = clamp(distanceOutsideIndicator / usableViewport, 0, 1);
+    const linearSpeed = Math.min(
+        MAX_SCROLL_PX_PER_SECOND,
+        MIN_SCROLL_PX_PER_SECOND
+            + normalizedDistance * (MAX_SCROLL_PX_PER_SECOND - MIN_SCROLL_PX_PER_SECOND)
+    );
 
-    return Math.sign(distance) * linearSpeed * globalAutoscrollGain;
+    return Math.sign(distance) * linearSpeed * GLOBAL_AUTOSCROLL_GAIN;
 }
 
 function getScrollVelocity() {
@@ -256,29 +474,42 @@ function getScrollVelocity() {
     const pointerX = indicatorPosition.x + virtualOffsetX;
     const pointerY = indicatorPosition.y + virtualOffsetY;
 
-    const leftBlend = Math.max(0, Math.min(1, (edgeThreshold + edgeBlendRange - pointerX) / edgeBlendRange));
-    const rightBlend = Math.max(0, Math.min(1, (pointerX - (window.innerWidth - edgeThreshold - edgeBlendRange)) / edgeBlendRange));
-    const topBlend = Math.max(0, Math.min(1, (edgeThreshold + edgeBlendRange - pointerY) / edgeBlendRange));
-    const bottomBlend = Math.max(0, Math.min(1, (pointerY - (window.innerHeight - edgeThreshold - edgeBlendRange)) / edgeBlendRange));
+    const leftBlend = clamp(
+        (EDGE_THRESHOLD_PX + EDGE_BLEND_RANGE_PX - pointerX) / EDGE_BLEND_RANGE_PX,
+        0,
+        1
+    );
+    const rightBlend = clamp(
+        (pointerX - (window.innerWidth - EDGE_THRESHOLD_PX - EDGE_BLEND_RANGE_PX)) / EDGE_BLEND_RANGE_PX,
+        0,
+        1
+    );
+    const topBlend = clamp(
+        (EDGE_THRESHOLD_PX + EDGE_BLEND_RANGE_PX - pointerY) / EDGE_BLEND_RANGE_PX,
+        0,
+        1
+    );
+    const bottomBlend = clamp(
+        (pointerY - (window.innerHeight - EDGE_THRESHOLD_PX - EDGE_BLEND_RANGE_PX)) / EDGE_BLEND_RANGE_PX,
+        0,
+        1
+    );
 
     const edgeVelocityX = leftBlend > 0
-        ? -edgeAutoScrollSpeed * globalAutoscrollGain
+        ? -EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
         : rightBlend > 0
-            ? edgeAutoScrollSpeed * globalAutoscrollGain
+            ? EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
             : baseVelocity.x;
 
     const edgeVelocityY = topBlend > 0
-        ? -edgeAutoScrollSpeed * globalAutoscrollGain
+        ? -EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
         : bottomBlend > 0
-            ? edgeAutoScrollSpeed * globalAutoscrollGain
+            ? EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
             : baseVelocity.y;
 
-    const blendX = Math.max(leftBlend, rightBlend);
-    const blendY = Math.max(topBlend, bottomBlend);
-
     return {
-        x: baseVelocity.x + (edgeVelocityX - baseVelocity.x) * blendX,
-        y: baseVelocity.y + (edgeVelocityY - baseVelocity.y) * blendY
+        x: baseVelocity.x + (edgeVelocityX - baseVelocity.x) * Math.max(leftBlend, rightBlend),
+        y: baseVelocity.y + (edgeVelocityY - baseVelocity.y) * Math.max(topBlend, bottomBlend)
     };
 }
 
@@ -289,40 +520,44 @@ function tickScroll(timestamp) {
         return;
     }
 
-    const deltaTime = lastAnimationTimestamp === null
-        ? nominalFrameDuration
-        : Math.min(timestamp - lastAnimationTimestamp, nominalFrameDuration * 2);
-    const frameScale = deltaTime / nominalFrameDuration;
+    const deltaTimeMs = lastAnimationTimestamp === null
+        ? 1000 / 60
+        : Math.min(timestamp - lastAnimationTimestamp, MAX_TIMESTEP_MS);
+    const deltaTimeSeconds = deltaTimeMs / 1000;
     lastAnimationTimestamp = timestamp;
 
+    activeScrollAxes = getScrollChainAxes(activeScrollTarget || getRootScrollElement());
+
     const velocity = getScrollVelocity();
-    smoothedVelocityX += (velocity.x - smoothedVelocityX) * velocitySmoothing;
-    smoothedVelocityY += (velocity.y - smoothedVelocityY) * velocitySmoothing;
+    const smoothingFactor = 1 - Math.exp(-VELOCITY_SMOOTHING_PER_SECOND * deltaTimeSeconds);
+    smoothedVelocityX += (velocity.x - smoothedVelocityX) * smoothingFactor;
+    smoothedVelocityY += (velocity.y - smoothedVelocityY) * smoothingFactor;
     updateScrollIndicator({ x: smoothedVelocityX, y: smoothedVelocityY });
     updateActiveCursor({ x: smoothedVelocityX, y: smoothedVelocityY });
 
     pendingScrollX = clamp(
-        pendingScrollX + smoothedVelocityX * frameScale,
-        -queuedScrollLimit,
-        queuedScrollLimit
+        pendingScrollX + smoothedVelocityX * deltaTimeSeconds,
+        -MAX_QUEUED_SCROLL_PX,
+        MAX_QUEUED_SCROLL_PX
     );
     pendingScrollY = clamp(
-        pendingScrollY + smoothedVelocityY * frameScale,
-        -queuedScrollLimit,
-        queuedScrollLimit
+        pendingScrollY + smoothedVelocityY * deltaTimeSeconds,
+        -MAX_QUEUED_SCROLL_PX,
+        MAX_QUEUED_SCROLL_PX
     );
 
-    const appliedScrollX = clamp(pendingScrollX, -maximumAppliedScrollPerFrame, maximumAppliedScrollPerFrame);
-    const appliedScrollY = clamp(pendingScrollY, -maximumAppliedScrollPerFrame, maximumAppliedScrollPerFrame);
+    const maxAppliedScrollForFrame = MAX_SCROLL_PX_PER_SECOND * deltaTimeSeconds;
+    const appliedScrollX = clamp(pendingScrollX, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
+    const appliedScrollY = clamp(pendingScrollY, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
 
     if (Math.abs(appliedScrollX) > 0.01 || Math.abs(appliedScrollY) > 0.01) {
-        applyScrollDelta(appliedScrollX, appliedScrollY);
+        applyScrollDeltaWithChaining(activeScrollTarget || getRootScrollElement(), appliedScrollX, appliedScrollY);
         pendingScrollX -= appliedScrollX;
         pendingScrollY -= appliedScrollY;
     }
 
-    virtualOffsetX = clamp(virtualOffsetX, -virtualPointerMaxDistance, virtualPointerMaxDistance);
-    virtualOffsetY = clamp(virtualOffsetY, -virtualPointerMaxDistance, virtualPointerMaxDistance);
+    virtualOffsetX = clamp(virtualOffsetX, -VIRTUAL_POINTER_MAX_DISTANCE_PX, VIRTUAL_POINTER_MAX_DISTANCE_PX);
+    virtualOffsetY = clamp(virtualOffsetY, -VIRTUAL_POINTER_MAX_DISTANCE_PX, VIRTUAL_POINTER_MAX_DISTANCE_PX);
 
     animationFrameID = window.requestAnimationFrame(tickScroll);
 }
@@ -346,7 +581,7 @@ function enableScrollLock(event) {
     pendingScrollX = 0;
     pendingScrollY = 0;
     activeScrollTarget = resolveScrollTarget(event);
-    activeScrollAxes = getScrollTargetAxes(activeScrollTarget);
+    activeScrollAxes = getScrollChainAxes(activeScrollTarget);
     showScrollIndicator(indicatorPosition.x, indicatorPosition.y);
     updateScrollIndicator();
     updateActiveCursor();
@@ -375,31 +610,23 @@ function disableScrollLock() {
     lastAnimationTimestamp = null;
 }
 
-function findHyperlinkTarget(target) {
-    if (!(target instanceof Element)) {
-        return null;
-    }
-
-    return target.closest("a[href], area[href]");
-}
-
 function handleMouseDown(event) {
-    if (!isAutoscrollEnabled) {
+    if (!isPageAutoscrollEnabled()) {
         return;
     }
 
     if (event.button === 1) {
         isHandlingMiddleClick = false;
 
-        if (findHyperlinkTarget(event.target)) {
+        if (findInteractiveTarget(event.target)) {
             return;
         }
 
         if (!isScrollLockEnabled) {
             const candidateTarget = resolveScrollTarget(event);
-            const candidateAxes = getScrollTargetAxes(candidateTarget);
+            const candidateAxes = getScrollChainAxes(candidateTarget);
 
-            if (!hasScrollableAxis(candidateAxes)) {
+            if (!candidateAxes.horizontal && !candidateAxes.vertical) {
                 return;
             }
         }
@@ -421,13 +648,11 @@ function handleMouseDown(event) {
         event.preventDefault();
         event.stopPropagation();
         disableScrollLock();
-        return;
     }
-
 }
 
 function suppressMiddleClick(event) {
-    if (event.button !== 1 || !isHandlingMiddleClick || findHyperlinkTarget(event.target)) {
+    if (event.button !== 1 || !isHandlingMiddleClick || findInteractiveTarget(event.target)) {
         return;
     }
 
@@ -446,18 +671,36 @@ function handleMouseUp(event) {
 }
 
 function handleMouseMove(event) {
-    if (!isScrollLockEnabled) {
+    if (!isScrollLockEnabled || !indicatorPosition) {
         return;
     }
 
-    virtualOffsetX = (event.clientX - indicatorPosition.x) * pointerDisplacementGain;
-    virtualOffsetY = (event.clientY - indicatorPosition.y) * pointerDisplacementGain;
+    virtualOffsetX = (event.clientX - indicatorPosition.x) * POINTER_DISPLACEMENT_GAIN;
+    virtualOffsetY = (event.clientY - indicatorPosition.y) * POINTER_DISPLACEMENT_GAIN;
 
     ensureAnimationLoop();
 }
 
 function handleKeyDown(event) {
     if (isScrollLockEnabled && event.key === "Escape") {
+        disableScrollLock();
+    }
+}
+
+function handleVisibilityChange() {
+    if (document.hidden) {
+        disableScrollLock();
+    }
+}
+
+function handleWheel() {
+    if (isScrollLockEnabled) {
+        disableScrollLock();
+    }
+}
+
+function handleContextMenu() {
+    if (isScrollLockEnabled) {
         disableScrollLock();
     }
 }
@@ -477,39 +720,55 @@ function promisifyStorageGet(defaultValues) {
     });
 }
 
-async function loadAutoscrollEnabledState() {
-    try {
-        if (promiseAPI?.storage?.local?.get) {
-            const items = await promiseAPI.storage.local.get({ [enabledStorageKey]: true });
-            isAutoscrollEnabled = items[enabledStorageKey] !== false;
-            return;
-        }
+async function getStoredSettings() {
+    const defaultValues = {
+        [enabledStorageKey]: true
+    };
 
-        const items = await promisifyStorageGet({ [enabledStorageKey]: true });
+    if (promiseAPI?.storage?.local?.get) {
+        return promiseAPI.storage.local.get(defaultValues);
+    }
+
+    return promisifyStorageGet(defaultValues);
+}
+
+async function loadAutoscrollSettings() {
+    try {
+        const items = await getStoredSettings();
         isAutoscrollEnabled = items[enabledStorageKey] !== false;
     } catch (error) {
         isAutoscrollEnabled = true;
     }
+
+    if (!isPageAutoscrollEnabled() && isScrollLockEnabled) {
+        disableScrollLock();
+    }
 }
 
 function handleStorageChanged(changes, areaName) {
-    if (areaName !== "local" || !changes[enabledStorageKey]) {
+    if (areaName !== "local") {
         return;
     }
 
-    isAutoscrollEnabled = changes[enabledStorageKey].newValue !== false;
+    if (changes[enabledStorageKey]) {
+        isAutoscrollEnabled = changes[enabledStorageKey].newValue !== false;
+    }
 
-    if (!isAutoscrollEnabled && isScrollLockEnabled) {
+    if (!isPageAutoscrollEnabled() && isScrollLockEnabled) {
         disableScrollLock();
     }
 }
 
 window.addEventListener("blur", disableScrollLock);
+window.addEventListener("pagehide", disableScrollLock);
+document.addEventListener("visibilitychange", handleVisibilityChange);
 document.addEventListener("mousedown", handleMouseDown, true);
 document.addEventListener("auxclick", suppressMiddleClick, true);
 document.addEventListener("mouseup", suppressMiddleClick, true);
 document.addEventListener("mouseup", handleMouseUp, true);
 document.addEventListener("mousemove", handleMouseMove, true);
 document.addEventListener("keydown", handleKeyDown, true);
+document.addEventListener("contextmenu", handleContextMenu, true);
+document.addEventListener("wheel", handleWheel, { capture: true, passive: true });
 extensionAPI.storage?.onChanged?.addListener(handleStorageChanged);
-loadAutoscrollEnabledState();
+loadAutoscrollSettings();
