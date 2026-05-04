@@ -23,6 +23,19 @@
 - Safari
 - A pointing device with a middle mouse button or equivalent input
 
+## Install
+
+1. Download the `.dmg` release.
+2. Open the `.dmg`.
+3. Drag `Middle Click Autoscroll.app` into `Applications`.
+4. Open `Middle Click Autoscroll` from `Applications`.
+5. If macOS blocks it, right-click the app, choose `Open`, then confirm.
+6. In Safari, open `Safari > Settings > Extensions`.
+7. Enable `Middle Click Autoscroll`.
+8. If prompted, allow access to `All Websites`.
+
+This release is currently unsigned, so macOS may show a warning the first time you open it.
+
 ## Running Locally
 
 1. Open `Middle Click Autoscroll.xcodeproj` in Xcode.
