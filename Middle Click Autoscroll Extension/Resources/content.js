@@ -1,18 +1,28 @@
+// Safari needed a few tuned deviations from Chromium's middle-click autoscroll:
+// a smaller deadzone to match the visible indicator, extra onset safeguards so
+// downward scrolling starts immediately, and light smoothing to reduce visible
+// stepping from JS-driven scroll updates.
 const INDICATOR_SIZE_PX = 34;
 const INDICATOR_RADIUS_PX = INDICATOR_SIZE_PX / 2;
-const MAX_SCROLL_PX_PER_SECOND = 6000;
+const MAX_SCROLL_PX_PER_SECOND = 15000;
 const EDGE_THRESHOLD_PX = 24;
-const EDGE_AUTO_SCROLL_PX_PER_SECOND = 7200;
+const EDGE_AUTO_SCROLL_PX_PER_SECOND = 16000;
 const GLOBAL_AUTOSCROLL_GAIN = 1.0;
 const POINTER_DISPLACEMENT_GAIN = 1.0;
 const EDGE_BLEND_RANGE_PX = 42;
-const VIRTUAL_POINTER_MAX_DISTANCE_PX = 480;
-const VELOCITY_SMOOTHING_PER_SECOND = 14.9;
+const AUTOSCROLL_DEADZONE_PX = 8;
+const VIRTUAL_POINTER_MAX_DISTANCE_PX = 700;
+const VELOCITY_SMOOTHING_PER_SECOND = 12.5;
+const APPLIED_SCROLL_SMOOTHING_PER_SECOND = 14;
 const MAX_QUEUED_SCROLL_PX = 250;
 const MAX_TIMESTEP_MS = 50;
-const DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND = 12;
-const INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND = 30;
+const DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND = 1;
+const INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND = 1;
 const MIN_SCROLL_PX_PER_SECOND = 35;
+const SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND = 1;
+const MIN_INITIAL_SCROLL_STEP_PX = 1.2;
+const SCROLL_SPEED_EXPONENT = 2.2;
+const SCROLL_SPEED_MULTIPLIER = 0.00010;
 
 const promiseAPI = globalThis.browser;
 const callbackAPI = globalThis.chrome;
@@ -42,6 +52,8 @@ let virtualOffsetX = 0;
 let virtualOffsetY = 0;
 let smoothedVelocityX = 0;
 let smoothedVelocityY = 0;
+let smoothedAppliedScrollX = 0;
+let smoothedAppliedScrollY = 0;
 let pendingScrollX = 0;
 let pendingScrollY = 0;
 let activeScrollTarget = null;
@@ -443,73 +455,34 @@ function updateScrollIndicator(velocity = { x: 0, y: 0 }) {
     );
 }
 
-function getAxisSpeed(distance, viewportSize, isEnabled) {
+function getAxisSpeed(distance, isEnabled) {
     if (!isEnabled) {
         return 0;
     }
 
-    const distanceOutsideIndicator = Math.max(0, Math.abs(distance) - INDICATOR_RADIUS_PX);
-    const usableViewport = Math.max(1, viewportSize / 2 - INDICATOR_RADIUS_PX);
+    // Chromium normalizes by display scale before applying the autoscroll curve.
+    const normalizedDistance = Math.abs(distance) / Math.max(window.devicePixelRatio || 1, 1);
+    const distanceOutsideDeadzone = Math.max(0, normalizedDistance - AUTOSCROLL_DEADZONE_PX);
 
-    if (distanceOutsideIndicator <= 0) {
+    if (distanceOutsideDeadzone <= 0) {
         return 0;
     }
 
-    const normalizedDistance = clamp(distanceOutsideIndicator / usableViewport, 0, 1);
-    const linearSpeed = Math.min(
+    const curvedSpeed = Math.min(
         MAX_SCROLL_PX_PER_SECOND,
-        MIN_SCROLL_PX_PER_SECOND
-            + normalizedDistance * (MAX_SCROLL_PX_PER_SECOND - MIN_SCROLL_PX_PER_SECOND)
+        Math.max(
+            MIN_SCROLL_PX_PER_SECOND,
+            Math.pow(distanceOutsideDeadzone, SCROLL_SPEED_EXPONENT) * SCROLL_SPEED_MULTIPLIER * 1000
+        )
     );
 
-    return Math.sign(distance) * linearSpeed * GLOBAL_AUTOSCROLL_GAIN;
+    return Math.sign(distance) * curvedSpeed * GLOBAL_AUTOSCROLL_GAIN;
 }
 
 function getScrollVelocity() {
-    const baseVelocity = {
-        x: getAxisSpeed(virtualOffsetX, window.innerWidth, activeScrollAxes.horizontal),
-        y: getAxisSpeed(virtualOffsetY, window.innerHeight, activeScrollAxes.vertical)
-    };
-
-    const pointerX = indicatorPosition.x + virtualOffsetX;
-    const pointerY = indicatorPosition.y + virtualOffsetY;
-
-    const leftBlend = clamp(
-        (EDGE_THRESHOLD_PX + EDGE_BLEND_RANGE_PX - pointerX) / EDGE_BLEND_RANGE_PX,
-        0,
-        1
-    );
-    const rightBlend = clamp(
-        (pointerX - (window.innerWidth - EDGE_THRESHOLD_PX - EDGE_BLEND_RANGE_PX)) / EDGE_BLEND_RANGE_PX,
-        0,
-        1
-    );
-    const topBlend = clamp(
-        (EDGE_THRESHOLD_PX + EDGE_BLEND_RANGE_PX - pointerY) / EDGE_BLEND_RANGE_PX,
-        0,
-        1
-    );
-    const bottomBlend = clamp(
-        (pointerY - (window.innerHeight - EDGE_THRESHOLD_PX - EDGE_BLEND_RANGE_PX)) / EDGE_BLEND_RANGE_PX,
-        0,
-        1
-    );
-
-    const edgeVelocityX = leftBlend > 0
-        ? -EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
-        : rightBlend > 0
-            ? EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
-            : baseVelocity.x;
-
-    const edgeVelocityY = topBlend > 0
-        ? -EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
-        : bottomBlend > 0
-            ? EDGE_AUTO_SCROLL_PX_PER_SECOND * GLOBAL_AUTOSCROLL_GAIN
-            : baseVelocity.y;
-
     return {
-        x: baseVelocity.x + (edgeVelocityX - baseVelocity.x) * Math.max(leftBlend, rightBlend),
-        y: baseVelocity.y + (edgeVelocityY - baseVelocity.y) * Math.max(topBlend, bottomBlend)
+        x: getAxisSpeed(virtualOffsetX, activeScrollAxes.horizontal),
+        y: getAxisSpeed(virtualOffsetY, activeScrollAxes.vertical)
     };
 }
 
@@ -530,10 +503,21 @@ function tickScroll(timestamp) {
 
     const velocity = getScrollVelocity();
     const smoothingFactor = 1 - Math.exp(-VELOCITY_SMOOTHING_PER_SECOND * deltaTimeSeconds);
-    smoothedVelocityX += (velocity.x - smoothedVelocityX) * smoothingFactor;
-    smoothedVelocityY += (velocity.y - smoothedVelocityY) * smoothingFactor;
-    updateScrollIndicator({ x: smoothedVelocityX, y: smoothedVelocityY });
-    updateActiveCursor({ x: smoothedVelocityX, y: smoothedVelocityY });
+
+    if (Math.abs(smoothedVelocityX) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.x) > 0) {
+        smoothedVelocityX = velocity.x;
+    } else {
+        smoothedVelocityX += (velocity.x - smoothedVelocityX) * smoothingFactor;
+    }
+
+    if (Math.abs(smoothedVelocityY) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.y) > 0) {
+        smoothedVelocityY = velocity.y;
+    } else {
+        smoothedVelocityY += (velocity.y - smoothedVelocityY) * smoothingFactor;
+    }
+
+    updateScrollIndicator(velocity);
+    updateActiveCursor(velocity);
 
     pendingScrollX = clamp(
         pendingScrollX + smoothedVelocityX * deltaTimeSeconds,
@@ -546,9 +530,24 @@ function tickScroll(timestamp) {
         MAX_QUEUED_SCROLL_PX
     );
 
+    if (Math.abs(pendingScrollX) > 0 && Math.abs(pendingScrollX) < MIN_INITIAL_SCROLL_STEP_PX) {
+        pendingScrollX = Math.sign(pendingScrollX) * MIN_INITIAL_SCROLL_STEP_PX;
+    }
+
+    if (Math.abs(pendingScrollY) > 0 && Math.abs(pendingScrollY) < MIN_INITIAL_SCROLL_STEP_PX) {
+        pendingScrollY = Math.sign(pendingScrollY) * MIN_INITIAL_SCROLL_STEP_PX;
+    }
+
     const maxAppliedScrollForFrame = MAX_SCROLL_PX_PER_SECOND * deltaTimeSeconds;
-    const appliedScrollX = clamp(pendingScrollX, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
-    const appliedScrollY = clamp(pendingScrollY, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
+    const targetAppliedScrollX = clamp(pendingScrollX, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
+    const targetAppliedScrollY = clamp(pendingScrollY, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
+    const appliedScrollSmoothingFactor = 1 - Math.exp(-APPLIED_SCROLL_SMOOTHING_PER_SECOND * deltaTimeSeconds);
+
+    smoothedAppliedScrollX += (targetAppliedScrollX - smoothedAppliedScrollX) * appliedScrollSmoothingFactor;
+    smoothedAppliedScrollY += (targetAppliedScrollY - smoothedAppliedScrollY) * appliedScrollSmoothingFactor;
+
+    const appliedScrollX = clamp(smoothedAppliedScrollX, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
+    const appliedScrollY = clamp(smoothedAppliedScrollY, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
 
     if (Math.abs(appliedScrollX) > 0.01 || Math.abs(appliedScrollY) > 0.01) {
         applyScrollDeltaWithChaining(activeScrollTarget || getRootScrollElement(), appliedScrollX, appliedScrollY);
@@ -578,6 +577,8 @@ function enableScrollLock(event) {
     virtualOffsetY = 0;
     smoothedVelocityX = 0;
     smoothedVelocityY = 0;
+    smoothedAppliedScrollX = 0;
+    smoothedAppliedScrollY = 0;
     pendingScrollX = 0;
     pendingScrollY = 0;
     activeScrollTarget = resolveScrollTarget(event);
@@ -595,6 +596,8 @@ function disableScrollLock() {
     virtualOffsetY = 0;
     smoothedVelocityX = 0;
     smoothedVelocityY = 0;
+    smoothedAppliedScrollX = 0;
+    smoothedAppliedScrollY = 0;
     pendingScrollX = 0;
     pendingScrollY = 0;
     activeScrollTarget = null;
