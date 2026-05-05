@@ -49,6 +49,7 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         }
 
         guard let safariURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: safariBundleIdentifier) else {
+            presentSafariLaunchFailureAlert(message: "Safari could not be located on this Mac.")
             return
         }
 
@@ -58,13 +59,33 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
         NSWorkspace.shared.openApplication(
             at: safariURL,
             configuration: configuration
-        ) { _, _ in
+        ) { application, error in
+            if let error {
+                DispatchQueue.main.async {
+                    self.presentSafariLaunchFailureAlert(message: error.localizedDescription)
+                }
+                return
+            }
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                NSRunningApplication.runningApplications(withBundleIdentifier: safariBundleIdentifier)
-                    .first?
+                (application ?? NSRunningApplication.runningApplications(withBundleIdentifier: safariBundleIdentifier).first)?
                     .activate(options: [.activateAllWindows])
                 NSApplication.shared.terminate(nil)
             }
+        }
+    }
+
+    private func presentSafariLaunchFailureAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Unable to Open Safari"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+
+        if let window = view.window ?? NSApplication.shared.mainWindow {
+            alert.beginSheetModal(for: window)
+        } else {
+            alert.runModal()
         }
     }
 
