@@ -28,8 +28,6 @@ Installing:
 Building:
 - macOS
 - Xcode
-- Safari
-- A pointing device with a middle mouse button or equivalent input
 
 ## Install
 
