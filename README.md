@@ -60,6 +60,7 @@ The helper app opens Safari and explains the extension enablement step. Once ena
 - This repository is intended for source distribution on GitHub rather than App Store submission.
 - The extension requests `storage` to persist the global enable/disable preference.
 - Xcode user data, derived data, and build artifacts are ignored.
+- This project was developed with the assistance of AI tools.
 
 ## License
 
