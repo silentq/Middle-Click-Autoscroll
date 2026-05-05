@@ -48,11 +48,15 @@ class ViewController: NSViewController, WKNavigationDelegate, WKScriptMessageHan
             return
         }
 
+        guard let safariURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: safariBundleIdentifier) else {
+            return
+        }
+
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
 
         NSWorkspace.shared.openApplication(
-            at: URL(fileURLWithPath: "/Applications/Safari.app"),
+            at: safariURL,
             configuration: configuration
         ) { _, _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
