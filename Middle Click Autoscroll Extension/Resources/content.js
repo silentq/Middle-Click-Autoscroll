@@ -2,27 +2,30 @@
 // a smaller deadzone to match the visible indicator, extra onset safeguards so
 // downward scrolling starts immediately, and light smoothing to reduce visible
 // stepping from JS-driven scroll updates.
-const INDICATOR_SIZE_PX = 34;
+const INDICATOR_SIZE_PX = 32;
 const INDICATOR_RADIUS_PX = INDICATOR_SIZE_PX / 2;
-const MAX_SCROLL_PX_PER_SECOND = 15000;
 const EDGE_THRESHOLD_PX = 24;
 const EDGE_AUTO_SCROLL_PX_PER_SECOND = 16000;
 const GLOBAL_AUTOSCROLL_GAIN = 1.0;
 const POINTER_DISPLACEMENT_GAIN = 1.0;
 const EDGE_BLEND_RANGE_PX = 42;
+
+// Autoscroll tuning. Distances here are CSS pixels from the locked origin.
 const AUTOSCROLL_DEADZONE_PX = 8;
 const VIRTUAL_POINTER_MAX_DISTANCE_PX = 700;
-const VELOCITY_SMOOTHING_PER_SECOND = 12.5;
-const APPLIED_SCROLL_SMOOTHING_PER_SECOND = 14;
+const LINEAR_SPEED_MULTIPLIER = 13;
+const SCROLL_SPEED_EXPONENT = 1.75;
+const SCROLL_SPEED_MULTIPLIER = 0.00215;
+const MIN_SCROLL_PX_PER_SECOND = 35;
+const MAX_SCROLL_PX_PER_SECOND = 5600;
+const VELOCITY_SMOOTHING_PER_SECOND = 36;
+const APPLIED_SCROLL_SMOOTHING_PER_SECOND = 22;
 const MAX_QUEUED_SCROLL_PX = 250;
 const MAX_TIMESTEP_MS = 50;
 const DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND = 1;
 const INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND = 1;
-const MIN_SCROLL_PX_PER_SECOND = 35;
 const SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND = 1;
 const MIN_INITIAL_SCROLL_STEP_PX = 1.2;
-const SCROLL_SPEED_EXPONENT = 2.2;
-const SCROLL_SPEED_MULTIPLIER = 0.00010;
 
 const promiseAPI = globalThis.browser;
 const callbackAPI = globalThis.chrome;
@@ -298,6 +301,7 @@ function createScrollIndicator() {
     host.style.setProperty("--up-color", "rgba(17, 17, 17, 0.42)");
     host.style.setProperty("--down-color", "rgba(17, 17, 17, 0.42)");
     host.style.setProperty("--center-color", "rgba(17, 17, 17, 0.82)");
+    host.style.opacity = "1";
 
     const shadowRoot = host.attachShadow({ mode: "open" });
 
@@ -338,10 +342,10 @@ function createScrollIndicator() {
             }
         </style>
         <div class="indicator" aria-hidden="true">
-            <svg viewBox="0 0 34 34" focusable="false">
-                <path class="arrow-up" d="M17 6.2 L12.4 12.8 H15.5 V15.3 H18.5 V12.8 H21.6 Z" />
-                <circle class="center-dot" cx="17" cy="17" r="3.6" />
-                <path class="arrow-down" d="M17 27.8 L21.6 21.2 H18.5 V18.7 H15.5 V21.2 H12.4 Z" />
+            <svg viewBox="0 0 32 32" focusable="false">
+                <path class="arrow-up" d="M16 6.4 L11.9 12.3 H14.7 V14.5 H17.3 V12.3 H20.1 Z" />
+                <circle class="center-dot" cx="16" cy="16" r="3.2" />
+                <path class="arrow-down" d="M16 25.6 L20.1 19.7 H17.3 V17.5 H14.7 V19.7 H11.9 Z" />
             </svg>
         </div>
     `;
@@ -352,6 +356,9 @@ function createScrollIndicator() {
             host.style.setProperty("--up-color", upColor);
             host.style.setProperty("--down-color", downColor);
             host.style.setProperty("--center-color", centerColor);
+        },
+        setVisible(isVisible) {
+            host.style.opacity = isVisible ? "1" : "0";
         }
     };
 }
@@ -389,6 +396,36 @@ function getArrowColor(isActive, isAvailable) {
     }
 
     return "rgba(17, 17, 17, 0.14)";
+}
+
+function getAutoscrollSpeedForDistance(distance) {
+    const distanceOutsideDeadzone = Math.max(0, Math.abs(distance) - AUTOSCROLL_DEADZONE_PX);
+
+    if (distanceOutsideDeadzone <= 0) {
+        return 0;
+    }
+
+    return clamp(
+        distanceOutsideDeadzone * LINEAR_SPEED_MULTIPLIER
+        + Math.pow(distanceOutsideDeadzone, SCROLL_SPEED_EXPONENT) * SCROLL_SPEED_MULTIPLIER * 1000,
+        MIN_SCROLL_PX_PER_SECOND,
+        MAX_SCROLL_PX_PER_SECOND
+    );
+}
+
+function buildAutoscrollSpeedTable(step = 10, maxDistance = 300) {
+    const safeStep = Math.max(1, Math.floor(step));
+    const safeMaxDistance = Math.max(0, Math.floor(maxDistance));
+    const rows = [];
+
+    for (let distance = 0; distance <= safeMaxDistance; distance += safeStep) {
+        rows.push({
+            distanceFromCenterCSSPx: distance,
+            speedPxPerSecond: Number(getAutoscrollSpeedForDistance(distance).toFixed(2))
+        });
+    }
+
+    return rows;
 }
 
 function getDirectionalCursor(velocity) {
@@ -444,10 +481,14 @@ function updateScrollIndicator(velocity = { x: 0, y: 0 }) {
         return;
     }
 
+    const isWithinHorizontalDeadzone = !activeScrollAxes.horizontal || Math.abs(virtualOffsetX) <= AUTOSCROLL_DEADZONE_PX;
+    const isWithinVerticalDeadzone = !activeScrollAxes.vertical || Math.abs(virtualOffsetY) <= AUTOSCROLL_DEADZONE_PX;
+    const isInNoScrollZone = isWithinHorizontalDeadzone && isWithinVerticalDeadzone;
     const activeY = Math.abs(velocity.y) > INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND
         ? Math.sign(velocity.y)
         : 0;
 
+    scrollIndicatorElements.setVisible(isInNoScrollZone);
     scrollIndicatorElements.updateColors(
         getArrowColor(activeY < 0, activeScrollAxes.vertical),
         getArrowColor(activeY > 0, activeScrollAxes.vertical),
@@ -460,23 +501,11 @@ function getAxisSpeed(distance, isEnabled) {
         return 0;
     }
 
-    // Chromium normalizes by display scale before applying the autoscroll curve.
-    const normalizedDistance = Math.abs(distance) / Math.max(window.devicePixelRatio || 1, 1);
-    const distanceOutsideDeadzone = Math.max(0, normalizedDistance - AUTOSCROLL_DEADZONE_PX);
+    return Math.sign(distance) * getAutoscrollSpeedForDistance(distance) * GLOBAL_AUTOSCROLL_GAIN;
+}
 
-    if (distanceOutsideDeadzone <= 0) {
-        return 0;
-    }
-
-    const curvedSpeed = Math.min(
-        MAX_SCROLL_PX_PER_SECOND,
-        Math.max(
-            MIN_SCROLL_PX_PER_SECOND,
-            Math.pow(distanceOutsideDeadzone, SCROLL_SPEED_EXPONENT) * SCROLL_SPEED_MULTIPLIER * 1000
-        )
-    );
-
-    return Math.sign(distance) * curvedSpeed * GLOBAL_AUTOSCROLL_GAIN;
+function isAxisWithinDeadzone(distance, isEnabled) {
+    return !isEnabled || Math.abs(distance) <= AUTOSCROLL_DEADZONE_PX;
 }
 
 function getScrollVelocity() {
@@ -503,14 +532,24 @@ function tickScroll(timestamp) {
 
     const velocity = getScrollVelocity();
     const smoothingFactor = 1 - Math.exp(-VELOCITY_SMOOTHING_PER_SECOND * deltaTimeSeconds);
+    const isHorizontalStopped = isAxisWithinDeadzone(virtualOffsetX, activeScrollAxes.horizontal);
+    const isVerticalStopped = isAxisWithinDeadzone(virtualOffsetY, activeScrollAxes.vertical);
 
-    if (Math.abs(smoothedVelocityX) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.x) > 0) {
+    if (isHorizontalStopped) {
+        smoothedVelocityX = 0;
+        smoothedAppliedScrollX = 0;
+        pendingScrollX = 0;
+    } else if (Math.abs(smoothedVelocityX) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.x) > 0) {
         smoothedVelocityX = velocity.x;
     } else {
         smoothedVelocityX += (velocity.x - smoothedVelocityX) * smoothingFactor;
     }
 
-    if (Math.abs(smoothedVelocityY) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.y) > 0) {
+    if (isVerticalStopped) {
+        smoothedVelocityY = 0;
+        smoothedAppliedScrollY = 0;
+        pendingScrollY = 0;
+    } else if (Math.abs(smoothedVelocityY) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.y) > 0) {
         smoothedVelocityY = velocity.y;
     } else {
         smoothedVelocityY += (velocity.y - smoothedVelocityY) * smoothingFactor;
@@ -774,4 +813,8 @@ document.addEventListener("keydown", handleKeyDown, true);
 document.addEventListener("contextmenu", handleContextMenu, true);
 document.addEventListener("wheel", handleWheel, { capture: true, passive: true });
 extensionAPI.storage?.onChanged?.addListener(handleStorageChanged);
+globalThis.middleClickAutoscrollDebug = {
+    buildAutoscrollSpeedTable,
+    getAutoscrollSpeedForDistance
+};
 loadAutoscrollSettings();
