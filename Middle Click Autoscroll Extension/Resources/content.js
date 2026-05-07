@@ -18,14 +18,12 @@ const SCROLL_SPEED_EXPONENT = 1.75;
 const SCROLL_SPEED_MULTIPLIER = 0.00215;
 const MIN_SCROLL_PX_PER_SECOND = 35;
 const MAX_SCROLL_PX_PER_SECOND = 5600;
-const VELOCITY_SMOOTHING_PER_SECOND = 36;
-const APPLIED_SCROLL_SMOOTHING_PER_SECOND = 22;
-const MAX_QUEUED_SCROLL_PX = 250;
 const MAX_TIMESTEP_MS = 50;
+const MAX_QUEUED_SCROLL_PX = Math.ceil(MAX_SCROLL_PX_PER_SECOND * (MAX_TIMESTEP_MS / 1000));
+const VELOCITY_SMOOTHING_PER_SECOND = 36;
 const DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND = 1;
 const INDICATOR_ACTIVE_THRESHOLD_PX_PER_SECOND = 1;
 const SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND = 1;
-const MIN_INITIAL_SCROLL_STEP_PX = 1.2;
 
 const promiseAPI = globalThis.browser;
 const callbackAPI = globalThis.chrome;
@@ -55,8 +53,6 @@ let virtualOffsetX = 0;
 let virtualOffsetY = 0;
 let smoothedVelocityX = 0;
 let smoothedVelocityY = 0;
-let smoothedAppliedScrollX = 0;
-let smoothedAppliedScrollY = 0;
 let pendingScrollX = 0;
 let pendingScrollY = 0;
 let activeScrollTarget = null;
@@ -64,6 +60,17 @@ let activeScrollAxes = { horizontal: false, vertical: true };
 let isHandlingMiddleClick = false;
 let scrollIndicatorHost = null;
 let scrollIndicatorElements = null;
+let latestDebugSnapshot = null;
+
+function readDebugFlag() {
+    try {
+        return globalThis.localStorage?.getItem("middleClickAutoscrollDebug") === "1";
+    } catch (error) {
+        return false;
+    }
+}
+
+const isDebugEnabled = readDebugFlag();
 
 function clamp(value, minimum, maximum) {
     return Math.max(minimum, Math.min(maximum, value));
@@ -428,6 +435,10 @@ function buildAutoscrollSpeedTable(step = 10, maxDistance = 300) {
     return rows;
 }
 
+function captureDebugSnapshot(snapshot) {
+    latestDebugSnapshot = snapshot;
+}
+
 function getDirectionalCursor(velocity) {
     const horizontalDirection = Math.abs(velocity.x) > DIRECTIONAL_CURSOR_THRESHOLD_PX_PER_SECOND
         ? Math.sign(velocity.x)
@@ -530,33 +541,32 @@ function tickScroll(timestamp) {
 
     activeScrollAxes = getScrollChainAxes(activeScrollTarget || getRootScrollElement());
 
-    const velocity = getScrollVelocity();
+    const targetVelocity = getScrollVelocity();
     const smoothingFactor = 1 - Math.exp(-VELOCITY_SMOOTHING_PER_SECOND * deltaTimeSeconds);
     const isHorizontalStopped = isAxisWithinDeadzone(virtualOffsetX, activeScrollAxes.horizontal);
     const isVerticalStopped = isAxisWithinDeadzone(virtualOffsetY, activeScrollAxes.vertical);
 
     if (isHorizontalStopped) {
         smoothedVelocityX = 0;
-        smoothedAppliedScrollX = 0;
         pendingScrollX = 0;
-    } else if (Math.abs(smoothedVelocityX) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.x) > 0) {
-        smoothedVelocityX = velocity.x;
+    } else if (Math.abs(smoothedVelocityX) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(targetVelocity.x) > 0) {
+        smoothedVelocityX = targetVelocity.x;
     } else {
-        smoothedVelocityX += (velocity.x - smoothedVelocityX) * smoothingFactor;
+        smoothedVelocityX += (targetVelocity.x - smoothedVelocityX) * smoothingFactor;
     }
 
     if (isVerticalStopped) {
         smoothedVelocityY = 0;
-        smoothedAppliedScrollY = 0;
         pendingScrollY = 0;
-    } else if (Math.abs(smoothedVelocityY) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(velocity.y) > 0) {
-        smoothedVelocityY = velocity.y;
+    } else if (Math.abs(smoothedVelocityY) <= SMOOTHING_BYPASS_THRESHOLD_PX_PER_SECOND && Math.abs(targetVelocity.y) > 0) {
+        smoothedVelocityY = targetVelocity.y;
     } else {
-        smoothedVelocityY += (velocity.y - smoothedVelocityY) * smoothingFactor;
+        smoothedVelocityY += (targetVelocity.y - smoothedVelocityY) * smoothingFactor;
     }
 
-    updateScrollIndicator(velocity);
-    updateActiveCursor(velocity);
+    const appliedVelocity = { x: smoothedVelocityX, y: smoothedVelocityY };
+    updateScrollIndicator(appliedVelocity);
+    updateActiveCursor(appliedVelocity);
 
     pendingScrollX = clamp(
         pendingScrollX + smoothedVelocityX * deltaTimeSeconds,
@@ -569,29 +579,35 @@ function tickScroll(timestamp) {
         MAX_QUEUED_SCROLL_PX
     );
 
-    if (Math.abs(pendingScrollX) > 0 && Math.abs(pendingScrollX) < MIN_INITIAL_SCROLL_STEP_PX) {
-        pendingScrollX = Math.sign(pendingScrollX) * MIN_INITIAL_SCROLL_STEP_PX;
-    }
+    const appliedScrollX = Math.trunc(pendingScrollX);
+    const appliedScrollY = Math.trunc(pendingScrollY);
 
-    if (Math.abs(pendingScrollY) > 0 && Math.abs(pendingScrollY) < MIN_INITIAL_SCROLL_STEP_PX) {
-        pendingScrollY = Math.sign(pendingScrollY) * MIN_INITIAL_SCROLL_STEP_PX;
-    }
-
-    const maxAppliedScrollForFrame = MAX_SCROLL_PX_PER_SECOND * deltaTimeSeconds;
-    const targetAppliedScrollX = clamp(pendingScrollX, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
-    const targetAppliedScrollY = clamp(pendingScrollY, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
-    const appliedScrollSmoothingFactor = 1 - Math.exp(-APPLIED_SCROLL_SMOOTHING_PER_SECOND * deltaTimeSeconds);
-
-    smoothedAppliedScrollX += (targetAppliedScrollX - smoothedAppliedScrollX) * appliedScrollSmoothingFactor;
-    smoothedAppliedScrollY += (targetAppliedScrollY - smoothedAppliedScrollY) * appliedScrollSmoothingFactor;
-
-    const appliedScrollX = clamp(smoothedAppliedScrollX, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
-    const appliedScrollY = clamp(smoothedAppliedScrollY, -maxAppliedScrollForFrame, maxAppliedScrollForFrame);
-
-    if (Math.abs(appliedScrollX) > 0.01 || Math.abs(appliedScrollY) > 0.01) {
+    if (appliedScrollX !== 0 || appliedScrollY !== 0) {
         applyScrollDeltaWithChaining(activeScrollTarget || getRootScrollElement(), appliedScrollX, appliedScrollY);
         pendingScrollX -= appliedScrollX;
         pendingScrollY -= appliedScrollY;
+    }
+
+    if (isDebugEnabled) {
+        captureDebugSnapshot({
+            dtMs: Number(deltaTimeMs.toFixed(3)),
+            targetVelocityPxPerSecond: {
+                x: Number(targetVelocity.x.toFixed(3)),
+                y: Number(targetVelocity.y.toFixed(3))
+            },
+            appliedVelocityPxPerSecond: {
+                x: Number(smoothedVelocityX.toFixed(3)),
+                y: Number(smoothedVelocityY.toFixed(3))
+            },
+            pendingFractionalScrollPx: {
+                x: Number(pendingScrollX.toFixed(3)),
+                y: Number(pendingScrollY.toFixed(3))
+            },
+            deadZoneActive: {
+                horizontal: isHorizontalStopped,
+                vertical: isVerticalStopped
+            }
+        });
     }
 
     virtualOffsetX = clamp(virtualOffsetX, -VIRTUAL_POINTER_MAX_DISTANCE_PX, VIRTUAL_POINTER_MAX_DISTANCE_PX);
@@ -616,8 +632,6 @@ function enableScrollLock(event) {
     virtualOffsetY = 0;
     smoothedVelocityX = 0;
     smoothedVelocityY = 0;
-    smoothedAppliedScrollX = 0;
-    smoothedAppliedScrollY = 0;
     pendingScrollX = 0;
     pendingScrollY = 0;
     activeScrollTarget = resolveScrollTarget(event);
@@ -635,8 +649,6 @@ function disableScrollLock() {
     virtualOffsetY = 0;
     smoothedVelocityX = 0;
     smoothedVelocityY = 0;
-    smoothedAppliedScrollX = 0;
-    smoothedAppliedScrollY = 0;
     pendingScrollX = 0;
     pendingScrollY = 0;
     activeScrollTarget = null;
@@ -813,8 +825,13 @@ document.addEventListener("keydown", handleKeyDown, true);
 document.addEventListener("contextmenu", handleContextMenu, true);
 document.addEventListener("wheel", handleWheel, { capture: true, passive: true });
 extensionAPI.storage?.onChanged?.addListener(handleStorageChanged);
-globalThis.middleClickAutoscrollDebug = {
-    buildAutoscrollSpeedTable,
-    getAutoscrollSpeedForDistance
-};
+if (isDebugEnabled) {
+    globalThis.middleClickAutoscrollDebug = {
+        buildAutoscrollSpeedTable,
+        getAutoscrollSpeedForDistance,
+        getSnapshot() {
+            return latestDebugSnapshot;
+        }
+    };
+}
 loadAutoscrollSettings();
